@@ -13,6 +13,7 @@ import {
   cdpCommandDeadlineRecovery,
   selectedCdpCommandTimeoutMs,
 } from "../../domain/browserDeadline.js";
+import { isCdpSessionNotFoundRejection } from "../CdpCommandRejection.js";
 import { CdpTargetSessionOwner } from "../CdpTargetSessionOwner.js";
 import { classifyCdpFrameUrl } from "../CdpCaptureDocuments.js";
 import {
@@ -286,11 +287,13 @@ export class CdpRuntimeSession {
       WEB_RUNTIME_LIMITS.cleanupTimeoutMs,
     );
     const failures: string[] = [];
+    let sessionGone = false;
     let transportFailure: AnalysisError | undefined;
     const send = async (
       method: CdpCommand,
       params: Readonly<Record<string, unknown>> = {},
     ): Promise<void> => {
+      if (sessionGone) return;
       try {
         await this.transport.connection.send(
           method,
@@ -299,6 +302,11 @@ export class CdpRuntimeSession {
           controller.signal,
         );
       } catch (cause: unknown) {
+        if (
+          this.transport.sessionId !== undefined &&
+          isCdpSessionNotFoundRejection(cause)
+        )
+          sessionGone = true;
         failures.push(
           `${method}: ${cause instanceof AnalysisError ? (cause.userMessage ?? cause.message) : errorMessage(cause)}`,
         );
@@ -311,7 +319,7 @@ export class CdpRuntimeSession {
         await send("Runtime.releaseObjectGroup", { objectGroup });
       for (const domain of [...this.enabledDomains].reverse())
         await send(`${domain}.disable`);
-      if (this.transport.sessionId !== undefined) {
+      if (!sessionGone && this.transport.sessionId !== undefined) {
         try {
           await this.transport.connection.send(
             "Target.detachFromTarget",
@@ -320,9 +328,10 @@ export class CdpRuntimeSession {
             controller.signal,
           );
         } catch (cause: unknown) {
-          failures.push(
-            `Target.detachFromTarget: ${cause instanceof AnalysisError ? (cause.userMessage ?? cause.message) : errorMessage(cause)}`,
-          );
+          if (!isCdpSessionNotFoundRejection(cause))
+            failures.push(
+              `Target.detachFromTarget: ${cause instanceof AnalysisError ? (cause.userMessage ?? cause.message) : errorMessage(cause)}`,
+            );
         }
       }
     } finally {
